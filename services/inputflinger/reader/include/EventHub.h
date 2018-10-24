@@ -381,6 +381,9 @@ public:
     inline bool test(size_t bit) const {
         return (bit < BITS) ? mData[bit / WIDTH].test(bit % WIDTH) : false;
     }
+    inline void set(size_t bit) {
+        mData[bit / WIDTH].set(bit % WIDTH);
+    }
     /* Returns total number of bytes needed for the array */
     inline size_t bytes() { return (BITS + CHAR_BIT - 1) / CHAR_BIT; }
     /* Returns true if array contains any non-zero bit from the range defined by start and end
