@@ -988,6 +988,18 @@ Error Layer::setBlockingRegion(const Region& region) {
     return static_cast<Error>(intError);
 }
 
+Error Layer::setLayerName(std::string name)
+{
+    auto intError = mComposer.setLayerName(mDisplay->getId(), mId, name);
+    return static_cast<Error>(intError);
+}
+
+Error Layer::setLayerHandleInfo(const sp<GraphicBuffer>& buffer)
+{
+    auto intError = mComposer.setLayerHandleInfo(mDisplay->getId(), mId, buffer);
+    return static_cast<Error>(intError);
+}
+
 } // namespace impl
 } // namespace HWC2
 } // namespace android
