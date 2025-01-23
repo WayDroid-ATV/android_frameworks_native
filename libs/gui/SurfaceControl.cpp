@@ -138,7 +138,7 @@ sp<Surface> SurfaceControl::generateSurfaceLocked()
     uint32_t ignore;
     auto flags = mCreateFlags & (ISurfaceComposerClient::eCursorWindow |
                                  ISurfaceComposerClient::eOpaque);
-    mBbqChild = mClient->createSurface(String8("bbq-wrapper"), 0, 0, mFormat,
+    mBbqChild = mClient->createSurface(String8(flags & ISurfaceComposerClient::eCursorWindow ? "Sprite" : "bbq-wrapper"), 0, 0, mFormat,
                                        flags, mHandle, {}, &ignore);
     mBbq = sp<BLASTBufferQueue>::make("bbq-adapter", mBbqChild, mWidth, mHeight, mFormat);
 
