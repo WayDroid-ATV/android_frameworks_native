@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <android-base/properties.h>
+
 #include <compositionengine/CompositionEngine.h>
 #include <compositionengine/LayerFECompositionState.h>
 #include <compositionengine/Output.h>
@@ -31,6 +33,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <string>
 
 namespace android::compositionengine::impl {
 
@@ -176,6 +179,8 @@ private:
 
     // Whether the content must be recomposed this frame.
     bool mMustRecompose = false;
+
+    bool mWaydroidMultiWindows = base::GetBoolProperty(std::string("persist.waydroid.multi_windows"), false);
 };
 
 // This template factory function standardizes the implementation details of the
