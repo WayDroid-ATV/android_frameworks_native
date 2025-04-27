@@ -1310,6 +1310,10 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setMetad
     s->metadata.mMap[key] = {p.data(), p.data() + p.dataSize()};
 
     registerSurfaceControlForCallback(sc);
+
+    if (sc->getParentingLayer() != sc)
+        setMetadata(sc->getParentingLayer(), key, p);
+
     return *this;
 }
 
