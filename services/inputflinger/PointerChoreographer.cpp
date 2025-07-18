@@ -149,9 +149,12 @@ NotifyMotionArgs PointerChoreographer::processMouseEventLocked(const NotifyMotio
 
     auto [displayId, pc] = ensureMouseControllerLocked(args.displayId);
 
+    const float absX = args.pointerCoords[0].getAxisValue(AMOTION_EVENT_AXIS_X);
+    const float absY = args.pointerCoords[0].getAxisValue(AMOTION_EVENT_AXIS_Y);
     const float deltaX = args.pointerCoords[0].getAxisValue(AMOTION_EVENT_AXIS_RELATIVE_X);
     const float deltaY = args.pointerCoords[0].getAxisValue(AMOTION_EVENT_AXIS_RELATIVE_Y);
-    pc.move(deltaX, deltaY);
+    pc.setPosition(absX, absY);
+    // pc.move(deltaX, deltaY);
     if (canUnfadeOnDisplay(displayId)) {
         pc.unfade(PointerControllerInterface::Transition::IMMEDIATE);
     }
