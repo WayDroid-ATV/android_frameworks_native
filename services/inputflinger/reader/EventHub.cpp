@@ -2348,6 +2348,7 @@ if (!isWayland) {
     } else if (inputType == WL_INPUT_KEYBOARD) {
         device->classes |= InputDeviceClass::KEYBOARD;
         device->classes |= InputDeviceClass::ALPHAKEY;
+        device->classes |= InputDeviceClass::DPAD;
 
         device->keyBitmask.set(BTN_MISC);
         device->keyBitmask.set(KEY_OK);
