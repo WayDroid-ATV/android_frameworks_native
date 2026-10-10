@@ -58,8 +58,6 @@ const char* kDefaultDriver = "/dev/vndbinder";
 #else
 const char* kDefaultDriver = "/dev/binder";
 #endif
-// Waydroid dual-driver: host-side binder device (bind-mounted from Halium host).
-const char* kHostDriver = "/dev/host_binder";
 
 // -------------------------------------------------------------------------
 
@@ -90,57 +88,42 @@ using android::binder::unique_fd;
 class PoolThread : public Thread
 {
 public:
-    explicit PoolThread(bool isMain, bool isHost)
-        : mIsMain(isMain), mIsHost(isHost)
+    explicit PoolThread(bool isMain)
+        : mIsMain(isMain)
     {
     }
 
 protected:
     virtual bool threadLoop()
     {
-        IPCThreadState::self(mIsHost)->joinThreadPool(mIsMain);
+        IPCThreadState::self()->joinThreadPool(mIsMain);
         return false;
     }
 
     const bool mIsMain;
-    const bool mIsHost;
 };
 
 sp<ProcessState> ProcessState::self()
 {
-    return init(kDefaultDriver, false /*requireDefault*/, false /*isHost*/);
-}
-
-sp<ProcessState> ProcessState::self(bool isHost)
-{
-    if (isHost) {
-        return init(kHostDriver, false /*requireDefault*/, true /*isHost*/);
-    }
-    return init(kDefaultDriver, false /*requireDefault*/, false /*isHost*/);
+    return init(kDefaultDriver, false /*requireDefault*/);
 }
 
 sp<ProcessState> ProcessState::initWithDriver(const char* driver)
 {
-    return init(driver, true /*requireDefault*/, false /*isHost*/);
+    return init(driver, true /*requireDefault*/);
 }
 
 sp<ProcessState> ProcessState::selfOrNull()
 {
-    return init(nullptr, false /*requireDefault*/, false /*isHost*/);
-}
-
-sp<ProcessState> ProcessState::selfOrNull(bool isHost)
-{
-    return init(nullptr, false /*requireDefault*/, isHost);
+    return init(nullptr, false /*requireDefault*/);
 }
 
 sp<ProcessState> ProcessState::selfIfKernelBinderEnabled() {
     if (access(kDefaultDriver, R_OK) == -1) return nullptr;
-    return init(kDefaultDriver, false /*requireDefault*/, false /*isHost*/);
+    return init(kDefaultDriver, false /*requireDefault*/);
 }
 
 [[clang::no_destroy]] static sp<ProcessState> gProcess;
-[[clang::no_destroy]] static sp<ProcessState> gHostProcess;
 [[clang::no_destroy]] static std::mutex gProcessMutex;
 
 static void verifyNotForked(bool forked) {
@@ -151,44 +134,18 @@ bool ProcessState::isVndservicemanagerEnabled() {
     return access("/vendor/bin/vndservicemanager", R_OK) == 0;
 }
 
-sp<ProcessState> ProcessState::init(const char* driver, bool requireDefault, bool isHost) {
+sp<ProcessState> ProcessState::init(const char* driver, bool requireDefault) {
     if (driver == nullptr) {
         std::lock_guard<std::mutex> l(gProcessMutex);
-        if (isHost) {
-            if (gHostProcess) {
-                verifyNotForked(gHostProcess->mForked);
-            }
-            return gHostProcess;
-        }
         if (gProcess) {
             verifyNotForked(gProcess->mForked);
         }
         return gProcess;
     }
 
-    // Waydroid dual-driver: pthread_atfork must be installed exactly once
-    // per-process regardless of whether host, non-host, or both slots init first.
-    [[clang::no_destroy]] static std::once_flag gAtforkOnce;
-    std::call_once(gAtforkOnce, []() {
-        int ret = pthread_atfork(ProcessState::onFork, ProcessState::parentPostFork,
-                                 ProcessState::childPostFork);
-        LOG_ALWAYS_FATAL_IF(ret != 0, "pthread_atfork error %s", strerror(ret));
-    });
-
     [[clang::no_destroy]] static std::once_flag gProcessOnce;
-    [[clang::no_destroy]] static std::once_flag gHostProcessOnce;
-
-    auto initOnce = [&]() {
+    std::call_once(gProcessOnce, [&](){
         if (access(driver, R_OK) == -1) {
-            // Waydroid dual-driver: never silently fall back from the host
-            // binder device to the local one -- that would misroute host-AIDL
-            // traffic into the Android container's own servicemanager. Leave
-            // gHostProcess unset and let callers treat nullptr as "no host".
-            if (isHost) {
-                ALOGW("Waydroid: host binder driver %s unavailable; "
-                      "host-AIDL passthrough disabled", driver);
-                return;
-            }
             ALOGE("Binder driver %s is unavailable. Using /dev/binder instead.", driver);
             driver = "/dev/binder";
         }
@@ -198,38 +155,29 @@ sp<ProcessState> ProcessState::init(const char* driver, bool requireDefault, boo
                   "by not initializing ProcessState with /dev/vndbinder.");
         }
 
+        // we must install these before instantiating the gProcess object,
+        // otherwise this would race with creating it, and there could be the
+        // possibility of an invalid gProcess object forked by another thread
+        // before these are installed
+        int ret = pthread_atfork(ProcessState::onFork, ProcessState::parentPostFork,
+                                 ProcessState::childPostFork);
+        LOG_ALWAYS_FATAL_IF(ret != 0, "pthread_atfork error %s", strerror(ret));
+
         std::lock_guard<std::mutex> l(gProcessMutex);
-        if (isHost) {
-            gHostProcess = sp<ProcessState>::make(driver, true /*isHost*/);
-        } else {
-            gProcess = sp<ProcessState>::make(driver, false /*isHost*/);
-        }
-    };
-
-    if (isHost) {
-        std::call_once(gHostProcessOnce, initOnce);
-    } else {
-        std::call_once(gProcessOnce, initOnce);
-    }
-
-    sp<ProcessState>& selected = isHost ? gHostProcess : gProcess;
-    // Waydroid dual-driver: if host init bailed (driver missing), return null.
-    // Callers must treat this as "no host available" and degrade gracefully.
-    if (isHost && selected == nullptr) {
-        return nullptr;
-    }
+        gProcess = sp<ProcessState>::make(driver);
+    });
 
     if (requireDefault) {
         // Detect if we are trying to initialize with a different driver, and
         // consider that an error. ProcessState will only be initialized once above.
-        LOG_ALWAYS_FATAL_IF(selected->getDriverName() != driver,
+        LOG_ALWAYS_FATAL_IF(gProcess->getDriverName() != driver,
                             "ProcessState was already initialized with %s,"
                             " can't initialize with %s.",
-                            selected->getDriverName().c_str(), driver);
+                            gProcess->getDriverName().c_str(), driver);
     }
 
-    verifyNotForked(selected->mForked);
-    return selected;
+    verifyNotForked(gProcess->mForked);
+    return gProcess;
 }
 
 sp<IBinder> ProcessState::getContextObject(const sp<IBinder>& /*caller*/)
@@ -265,12 +213,6 @@ void ProcessState::childPostFork() {
         // "O_CLOFORK"
         close(gProcess->mDriverFD);
         gProcess->mDriverFD = -1;
-    }
-    if (gHostProcess) {
-        gHostProcess->mForked = true;
-
-        close(gHostProcess->mDriverFD);
-        gHostProcess->mDriverFD = -1;
     }
     gProcessMutex.unlock();
 }
@@ -373,7 +315,7 @@ ssize_t ProcessState::getStrongRefCountForNode(const sp<BpBinder>& binder) {
 }
 
 void ProcessState::setCallRestriction(CallRestriction restriction) {
-    LOG_ALWAYS_FATAL_IF(IPCThreadState::selfOrNull(mIsHost) != nullptr,
+    LOG_ALWAYS_FATAL_IF(IPCThreadState::selfOrNull() != nullptr,
         "Call restrictions must be set before the threadpool is started.");
 
     mCallRestriction = restriction;
@@ -431,7 +373,7 @@ sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
                 // Note that this is not race-free if the context manager
                 // dies while this code runs.
 
-                IPCThreadState* ipc = IPCThreadState::self(mIsHost);
+                IPCThreadState* ipc = IPCThreadState::self();
 
                 CallRestriction originalCallRestriction = ipc->getCallRestriction();
                 ipc->setCallRestriction(CallRestriction::NONE);
@@ -446,7 +388,7 @@ sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
                    return nullptr;
             }
 
-            sp<BpBinder> bp = BpBinder::PrivateAccessor::create(handle, mIsHost, &postTask);
+            sp<BpBinder> bp = BpBinder::PrivateAccessor::create(handle, &postTask);
             e->binder = bp.get();
             if (bp) e->refs = bp->getWeakRefs();
             result = bp;
@@ -496,7 +438,7 @@ void ProcessState::spawnPooledThread(bool isMain)
     if (mThreadPoolStarted) {
         String8 name = makeBinderThreadName();
         ALOGV("Spawning new pooled thread, name=%s\n", name.c_str());
-        sp<Thread> t = sp<PoolThread>::make(isMain, mIsHost);
+        sp<Thread> t = sp<PoolThread>::make(isMain);
         t->run(name.c_str());
         mKernelStartedThreads++;
     }
@@ -654,7 +596,7 @@ static unique_fd open_driver(const char* driver, String8* error) {
     return fd;
 }
 
-ProcessState::ProcessState(const char* driver, bool isHost)
+ProcessState::ProcessState(const char* driver)
       : mDriverName(String8(driver)),
         mDriverFD(-1),
         mVMStart(MAP_FAILED),
@@ -666,8 +608,7 @@ ProcessState::ProcessState(const char* driver, bool isHost)
         mForked(false),
         mThreadPoolStarted(false),
         mThreadPoolSeq(1),
-        mCallRestriction(CallRestriction::NONE),
-        mIsHost(isHost) {
+        mCallRestriction(CallRestriction::NONE) {
     String8 error;
     unique_fd opened = open_driver(driver, &error);
 

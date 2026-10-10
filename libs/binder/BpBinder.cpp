@@ -21,7 +21,6 @@
 
 #include <binder/IPCThreadState.h>
 #include <binder/IResultReceiver.h>
-#include <binder/ProcessState.h>
 #include <binder/RpcSession.h>
 #include <binder/Stability.h>
 #include <binder/Trace.h>
@@ -171,10 +170,6 @@ sp<IBinder> BpBinder::ObjectManager::lookupOrCreateWeak(const void* objectID, ob
 // ---------------------------------------------------------------------------
 
 sp<BpBinder> BpBinder::create(int32_t handle, std::function<void()>* postTask) {
-    return create(handle, /*isHost=*/false, postTask);
-}
-
-sp<BpBinder> BpBinder::create(int32_t handle, bool isHost, std::function<void()>* postTask) {
     if constexpr (!kEnableKernelIpc) {
         LOG_ALWAYS_FATAL("Binder kernel driver disabled at build time");
         return nullptr;
@@ -183,7 +178,7 @@ sp<BpBinder> BpBinder::create(int32_t handle, bool isHost, std::function<void()>
 
     int32_t trackedUid = -1;
     if (sCountByUidEnabled) {
-        trackedUid = IPCThreadState::self(isHost)->getCallingUid();
+        trackedUid = IPCThreadState::self()->getCallingUid();
         RpcMutexUniqueLock _l(sTrackingLock);
         const uint32_t trackedValue = sTrackingMap[trackedUid];
         const uint32_t currentValue = trackedValue & COUNTING_VALUE_MASK;
@@ -247,7 +242,7 @@ sp<BpBinder> BpBinder::create(int32_t handle, bool isHost, std::function<void()>
             ALOGW("Unexpectedly many live BinderProxies: %d\n", numProxies);
         }
     }
-    return sp<BpBinder>::make(BinderHandle{handle, isHost}, trackedUid);
+    return sp<BpBinder>::make(BinderHandle{handle}, trackedUid);
 }
 
 sp<BpBinder> BpBinder::create(const sp<RpcSession>& session, uint64_t address) {
@@ -282,7 +277,7 @@ BpBinder::BpBinder(BinderHandle&& handle, int32_t trackedUid) : BpBinder(Handle(
 
     ALOGV("Creating BpBinder %p handle %d\n", this, this->binderHandle());
 
-    IPCThreadState::self(isHostBinderHandle())->incWeakHandle(this->binderHandle(), this);
+    IPCThreadState::self()->incWeakHandle(this->binderHandle(), this);
 }
 
 BpBinder::BpBinder(RpcHandle&& handle) : BpBinder(Handle(handle)) {
@@ -299,15 +294,6 @@ uint64_t BpBinder::rpcAddress() const {
 
 const sp<RpcSession>& BpBinder::rpcSession() const {
     return std::get<RpcHandle>(mHandle).session;
-}
-
-bool BpBinder::isHostBinderHandle() const {
-    if (!std::holds_alternative<BinderHandle>(mHandle)) return false;
-    return std::get<BinderHandle>(mHandle).isHost;
-}
-
-bool BpBinder::isHostBinder() const {
-    return isHostBinderHandle();
 }
 
 int32_t BpBinder::binderHandle() const {
@@ -441,15 +427,7 @@ status_t BpBinder::transact(
                 return INVALID_OPERATION;
             }
 
-            // Waydroid dual-driver: stamp the Parcel so any sub-binders
-            // flattened into `data` route through the correct ProcessState,
-            // and so the kernel freeBuffer path picks the right driver.
-            data.SetIsHost(isHostBinderHandle());
-            status = IPCThreadState::self(isHostBinderHandle())
-                             ->transact(binderHandle(), code, data, reply, flags);
-            if (reply != nullptr) {
-                reply->SetIsHost(isHostBinderHandle());
-            }
+            status = IPCThreadState::self()->transact(binderHandle(), code, data, reply, flags);
         }
 
         if (data.dataSize() > binder::kLogTransactionsOverBytes) {
@@ -481,7 +459,7 @@ status_t BpBinder::linkToDeath(
         LOG_ALWAYS_FATAL("Binder kernel driver disabled at build time");
         return INVALID_OPERATION;
     } else {
-        if (ProcessState::self(isHostBinderHandle())->getThreadPoolMaxTotalThreadCount() == 0) {
+        if (ProcessState::self()->getThreadPoolMaxTotalThreadCount() == 0) {
             ALOGW("Linking to death on %s but there are no threads (yet?) listening to incoming "
                   "transactions. See ProcessState::startThreadPool and "
                   "ProcessState::setThreadPoolMaxThreadCount. Generally you should setup the "
@@ -512,7 +490,7 @@ status_t BpBinder::linkToDeath(
                 if (!isRpcBinder()) {
                     if constexpr (kEnableKernelIpc) {
                         getWeakRefs()->incWeak(this);
-                        IPCThreadState* self = IPCThreadState::self(isHostBinderHandle());
+                        IPCThreadState* self = IPCThreadState::self();
                         self->requestDeathNotification(binderHandle(), this);
                         self->flushCommands();
                     }
@@ -556,7 +534,7 @@ status_t BpBinder::unlinkToDeath(
                 ALOGV("Clearing death notification: %p handle %d\n", this, binderHandle());
                 if (!isRpcBinder()) {
                     if constexpr (kEnableKernelIpc) {
-                        IPCThreadState* self = IPCThreadState::self(isHostBinderHandle());
+                        IPCThreadState* self = IPCThreadState::self();
                         self->clearDeathNotification(binderHandle(), this);
                         self->flushCommands();
                     }
@@ -590,7 +568,7 @@ void BpBinder::sendObituary()
         ALOGV("Clearing sent death notification: %p handle %d\n", this, binderHandle());
         if (!isRpcBinder()) {
             if constexpr (kEnableKernelIpc) {
-                IPCThreadState* self = IPCThreadState::self(isHostBinderHandle());
+                IPCThreadState* self = IPCThreadState::self();
                 self->clearDeathNotification(binderHandle(), this);
                 self->flushCommands();
             }
@@ -626,8 +604,8 @@ void BpBinder::onFrozenStateChangeListenerRemoved() {
             mFrozen.reset();
         } else {
             mFrozen->isPendingClear = false;
-            std::ignore = IPCThreadState::self(isHostBinderHandle())
-                                  ->addFrozenStateChangeCallback(binderHandle(), this);
+            std::ignore =
+                    IPCThreadState::self()->addFrozenStateChangeCallback(binderHandle(), this);
         }
     }
 }
@@ -635,14 +613,8 @@ void BpBinder::onFrozenStateChangeListenerRemoved() {
 status_t BpBinder::addFrozenStateChangeCallback(const wp<FrozenStateChangeCallback>& callback) {
     LOG_ALWAYS_FATAL_IF(isRpcBinder(),
                         "addFrozenStateChangeCallback() is not supported for RPC Binder.");
-    // Waydroid dual-driver: host ProcessState never calls startThreadPool() (we
-    // only act as a client toward Halium), so the thread-pool check below would
-    // always abort for host proxies. Frozen-state callbacks are not supported
-    // on host binders; return a non-fatal error instead.
-    if (isHostBinderHandle()) return INVALID_OPERATION;
     LOG_ALWAYS_FATAL_IF(!kEnableKernelIpc, "Binder kernel driver disabled at build time");
-    LOG_ALWAYS_FATAL_IF(ProcessState::self(isHostBinderHandle())
-                                        ->getThreadPoolMaxTotalThreadCount() == 0,
+    LOG_ALWAYS_FATAL_IF(ProcessState::self()->getThreadPoolMaxTotalThreadCount() == 0,
                         "addFrozenStateChangeCallback on %s but there are no threads "
                         "(yet?) listening to incoming transactions. See "
                         "ProcessState::startThreadPool "
@@ -661,7 +633,7 @@ status_t BpBinder::addFrozenStateChangeCallback(const wp<FrozenStateChangeCallba
         RpcMutexUniqueLock _l(mLock);
         if (!mFrozen) {
             ALOGV("Requesting freeze notification: %p handle %d\n", this, binderHandle());
-            IPCThreadState* self = IPCThreadState::self(isHostBinderHandle());
+            IPCThreadState* self = IPCThreadState::self();
             status_t status = self->addFrozenStateChangeCallback(binderHandle(), this);
             if (status != NO_ERROR) {
                 // Avoids logspam if kernel does not support freeze
@@ -675,8 +647,9 @@ status_t BpBinder::addFrozenStateChangeCallback(const wp<FrozenStateChangeCallba
             }
             mFrozen = std::make_unique<FrozenStateChange>();
             if (!mFrozen) {
-                std::ignore = IPCThreadState::self(isHostBinderHandle())
-                                      ->removeFrozenStateChangeCallback(binderHandle(), this);
+                std::ignore =
+                        IPCThreadState::self()->removeFrozenStateChangeCallback(binderHandle(),
+                                                                                this);
                 return NO_MEMORY;
             }
         }
@@ -710,8 +683,9 @@ status_t BpBinder::removeFrozenStateChangeCallback(const wp<FrozenStateChangeCal
                 if (mFrozen->isPendingClear) {
                     return NO_ERROR;
                 }
-                status_t status = IPCThreadState::self(isHostBinderHandle())
-                                          ->removeFrozenStateChangeCallback(binderHandle(), this);
+                status_t status =
+                        IPCThreadState::self()->removeFrozenStateChangeCallback(binderHandle(),
+                                                                                this);
                 if (status != NO_ERROR) {
                     ALOGE("Unexpected error from "
                           "IPCThreadState.removeFrozenStateChangeCallback: %s. "
@@ -819,7 +793,7 @@ BpBinder::~BpBinder() {
 
     ALOGV("Destroying BpBinder %p handle %d\n", this, binderHandle());
 
-    IPCThreadState* ipc = IPCThreadState::self(isHostBinderHandle());
+    IPCThreadState* ipc = IPCThreadState::self();
 
     if (mTrackedUid >= 0) {
         RpcMutexUniqueLock _l(sTrackingLock);
@@ -844,9 +818,7 @@ BpBinder::~BpBinder() {
     uint32_t numProxies = --sBinderProxyCount;
     binder::os::trace_int(ATRACE_TAG_AIDL, "binder_proxies", numProxies);
     if (ipc) {
-        // Waydroid dual-driver: expungeHandle is static, so pass isHost explicitly
-        // to route it to the host-side ProcessState if this is a host BpBinder.
-        IPCThreadState::expungeHandle(binderHandle(), this, isHostBinderHandle());
+        ipc->expungeHandle(binderHandle(), this);
         ipc->decWeakHandle(binderHandle());
     }
 }
@@ -862,7 +834,7 @@ void BpBinder::onFirstRef() {
     }
 
     ALOGV("onFirstRef BpBinder %p handle %d\n", this, binderHandle());
-    IPCThreadState* ipc = IPCThreadState::self(isHostBinderHandle());
+    IPCThreadState* ipc = IPCThreadState::self();
     if (ipc) ipc->incStrongHandle(binderHandle(), this);
 }
 
@@ -881,7 +853,7 @@ void BpBinder::onLastStrongRef(const void* /*id*/) {
     IF_ALOGV() {
         printRefs();
     }
-    IPCThreadState* ipc = IPCThreadState::self(isHostBinderHandle());
+    IPCThreadState* ipc = IPCThreadState::self();
     if (ipc && !kDecStrongLast) ipc->decStrongHandle(binderHandle());
 
     mLock.lock();
@@ -898,14 +870,15 @@ void BpBinder::onLastStrongRef(const void* /*id*/) {
     if (mFrozen != nullptr) {
         if (waitForFrozenListenerRemovalCompletion()) {
             if (!mFrozen->isPendingClear) {
-                std::ignore = IPCThreadState::self(isHostBinderHandle())
-                                      ->removeFrozenStateChangeCallback(binderHandle(), this);
+                std::ignore =
+                        IPCThreadState::self()->removeFrozenStateChangeCallback(binderHandle(),
+                                                                                this);
                 mFrozen->isPendingClear = true;
             }
             mFrozen->callbacks.clear();
         } else {
-            std::ignore = IPCThreadState::self(isHostBinderHandle())
-                                  ->removeFrozenStateChangeCallback(binderHandle(), this);
+            std::ignore =
+                    IPCThreadState::self()->removeFrozenStateChangeCallback(binderHandle(), this);
             mFrozen.reset();
         }
     }
@@ -934,7 +907,7 @@ bool BpBinder::onIncStrongAttempted(uint32_t /*flags*/, const void* /*id*/)
     }
 
     ALOGV("onIncStrongAttempted BpBinder %p handle %d\n", this, binderHandle());
-    IPCThreadState* ipc = IPCThreadState::self(isHostBinderHandle());
+    IPCThreadState* ipc = IPCThreadState::self();
     return ipc ? ipc->attemptIncStrongHandle(binderHandle()) == NO_ERROR : false;
 }
 
